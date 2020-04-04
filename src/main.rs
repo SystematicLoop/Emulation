@@ -250,61 +250,93 @@ impl Team {
 }
 
 #[derive(Copy, Clone)]
-enum Tile {
-    None,
-    Wall,
-    Some(Unit)
+enum Traverse {
+    Ground,
+    Water,
+    Wall
+}
+
+enum TileKind {
+    Floor,
+    Wall
+}
+
+#[derive(Copy, Clone)]
+struct Tile {
+    traverse:   Traverse,
+    fore_color: Color,
+    back_color: Color,
+    glyph:      char,
+    unit:       Option<Unit>
 }
 
 impl Tile {
-    fn color(&self) -> tcod::colors::Color {
-        match self {
-            Tile::None       => tcod::colors::DARK_GREY,
-            Tile::Wall       => tcod::colors::DARK_GREY,
-            Tile::Some(unit) => unit.team.color()
+    fn new(kind: TileKind) -> Tile {
+        use TileKind::*;
+        
+        match kind {
+            Floor => Tile {
+                traverse:   Traverse::Ground,
+                fore_color: DARK_GREY,
+                back_color: BLACK,
+                glyph:      '.',
+                unit:       None
+            },
+
+            Wall => Tile {
+                traverse:   Traverse::Wall,
+                fore_color: DARK_GREY,
+                back_color: DARK_GREY,
+                glyph:      ' ',
+                unit:       None
+            }
         }
     }
 
+    fn fore_color(&self) -> Color {
+        match self.unit {
+            Some(unit) => unit.team.color(),
+            None       => self.fore_color
+        }
+    }
+
+    fn back_color(&self) -> Color {
+        self.back_color        
+    }
+
     fn glyph(&self) -> char {
-        match self {
-            Tile::None       => '.',
-            Tile::Wall       => '\u{00DB}',
-            Tile::Some(unit) => unit.glyph
+        match self.unit {
+            Some(unit) => unit.glyph,
+            None       => self.glyph
         }
     }
 
     fn unit(&self) -> Option<&Unit> {
-        match self {
-            Tile::Some(unit) => Some(unit),
-            _                => None
-        }
+        self.unit.as_ref()
     }
 
     fn unit_mut(&mut self) -> Option<&mut Unit> {
-        match self {
-            Tile::Some(unit) => Some(unit),
-            _                => None
-        }
+        self.unit.as_mut()
     }
 
     fn team(&self) -> Option<Team> {
-        match self {
-            Tile::Some(unit) => Some(unit.team),
-            _                => None
+        match self.unit {
+            Some(unit) => Some(unit.team),
+            None       => None
         }
     }
 
-    fn wall(&self) -> bool {
-        match self {
-            Tile::Wall => true,
-            _          => false
+    fn is_ground(&self) -> bool {
+        match self.traverse {
+            Traverse::Ground => true,
+            _                => false
         }
     }
 
-    fn floor(&self) -> bool {
-        match self {
-            Tile::None => true,
-            _          => false
+    fn is_wall(&self) -> bool {
+        match self.traverse {
+            Traverse::Wall => true,
+            _              => false
         }
     }
 }
@@ -317,10 +349,21 @@ struct Board {
 
 impl Board {
     fn new(width: u32, height: u32) -> Self {
+        let mut tiles = vec![Tile::new(TileKind::Floor); (width * height) as usize];
+        for x in 0..width {
+            tiles[x as usize] = Tile::new(TileKind::Wall);
+            tiles[(x + width * (height - 1)) as usize] = Tile::new(TileKind::Wall);
+        }
+
+        for y in 0..height {
+            tiles[(width * y) as usize] = Tile::new(TileKind::Wall);
+            tiles[(width - 1 + width * y) as usize] = Tile::new(TileKind::Wall);
+        }
+
         Board {
             width:  width,
             height: height,
-            tiles:  vec![Tile::None; (width * height) as usize]
+            tiles:  tiles
         }
     }
 
@@ -367,8 +410,8 @@ impl Board {
 
     fn spawn(&mut self, pos: Vec2, kind: UnitKind, team: Team) {
         if let Some(tile) = self.get_tile_mut(pos) {
-            if tile.floor() {
-                *tile = Tile::Some(Unit::new(kind, team));
+            if tile.is_ground() {
+                tile.unit = Some(Unit::new(kind, team));
             }
         }
     }
@@ -380,7 +423,7 @@ impl Board {
                 let tile = self.get_tile((x, y).into())
                     .unwrap();
 
-                map.set(x as i32, y as i32, true, !tile.wall());
+                map.set(x as i32, y as i32, true, tile.is_ground());
             }
         }
 
@@ -408,7 +451,7 @@ fn do_move(board: &mut Board, m: Move) {
     let j = board.to_index(m.dest);
     
     if let Pair::Both(tile, other_tile) = index_twice(&mut board.tiles, i, j) {
-        if other_tile.wall() {
+        if other_tile.is_wall() {
             println!("Movement blocked by wall.");
             return;
         }
@@ -423,12 +466,12 @@ fn do_move(board: &mut Board, m: Move) {
                 (*other_unit).health -= unit.damage;
                 if other_unit.health <= 0 {
                     if unit.missile {
-                        *other_tile = Tile::None;
+                        other_tile.unit = None;
                     } else {
-                        *other_tile = *tile;
+                        other_tile.unit = tile.unit;
                     }
 
-                    *tile = Tile::None;
+                    tile.unit = None;
                 } else {
                     
                 }
@@ -467,8 +510,8 @@ fn do_move(board: &mut Board, m: Move) {
             
             (Some(_), None) => {
                 println!("The target was a floor.");
-                *other_tile = *tile;
-                *tile       = Tile::None;
+                other_tile.unit = tile.unit;
+                tile.unit       = None;
             },
     
             _ => {
@@ -509,7 +552,7 @@ fn movement_query(board: &Board, movement: &mut Movement) {
             movement.abs_origin.square_distance_to(&north) <= movement.range {
             
             movement.checked_tiles.push(north);
-            if !north_tile.wall() {
+            if north_tile.is_ground() {
                 movement.valid_tiles.push(north);
                 
                 let rel_origin = movement.rel_origin;
@@ -525,7 +568,7 @@ fn movement_query(board: &Board, movement: &mut Movement) {
             movement.abs_origin.square_distance_to(&east) <= movement.range {
             
             movement.checked_tiles.push(east);
-            if !east_tile.wall() {
+            if east_tile.is_ground() {
                 movement.valid_tiles.push(east);
                 
                 let rel_origin = movement.rel_origin;
@@ -541,7 +584,7 @@ fn movement_query(board: &Board, movement: &mut Movement) {
             movement.abs_origin.square_distance_to(&south) <= movement.range {
             
             movement.checked_tiles.push(south);
-            if !south_tile.wall() {
+            if south_tile.is_ground() {
                 movement.valid_tiles.push(south);
                 
                 let rel_origin = movement.rel_origin;
@@ -557,7 +600,7 @@ fn movement_query(board: &Board, movement: &mut Movement) {
             movement.abs_origin.square_distance_to(&west) <= movement.range {
             
             movement.checked_tiles.push(west);
-            if !west_tile.wall() {
+            if west_tile.is_ground() {
                 movement.valid_tiles.push(west);
                 
                 let rel_origin = movement.rel_origin;
@@ -621,9 +664,9 @@ fn draw(graphics: &mut Graphics, game: &Game) {
             let tile = game.board.get_tile(Vec2::new(x as i32, y as i32))
                 .unwrap();
 
-            let fore_color = tile.color();
-            let back_color = BLACK;
-            let glyph = tile.glyph();
+            let fore_color = tile.fore_color();
+            let back_color = tile.back_color();
+            let glyph      = tile.glyph();
 
             graphics.board.put_char_ex(
                 x as i32,
@@ -713,14 +756,6 @@ fn main() {
 
     let mut board = Board::new(10, 10);
 
-    for y in 0..board.height {
-        for x in 0..board.width {
-            if x == 0 || x == board.width - 1 || y == 0 || y == board.height - 1 {
-                board.set_tile((x, y).into(), Tile::Wall);
-            }
-        }
-    }
-
     board.spawn((1, 1).into(), UnitKind::Engineer, Team::Red);
     board.spawn((2, 1).into(), UnitKind::Infantry, Team::Red);
     board.spawn((3, 1).into(), UnitKind::Infantry, Team::Red);
@@ -735,10 +770,10 @@ fn main() {
     board.spawn(Vec2::new(4, 4), UnitKind::Humvee,  Team::Green);
     
     // Idea: Units that can demolish walls. Maybe Engineers?
-    board.set_tile((3, 4).into(), Tile::Wall);
-    board.set_tile((3, 5).into(), Tile::Wall);
-    board.set_tile((6, 4).into(), Tile::Wall);
-    board.set_tile((6, 5).into(), Tile::Wall);
+    board.set_tile((3, 4).into(), Tile::new(TileKind::Wall));
+    board.set_tile((3, 5).into(), Tile::new(TileKind::Wall));
+    board.set_tile((6, 4).into(), Tile::new(TileKind::Wall));
+    board.set_tile((6, 5).into(), Tile::new(TileKind::Wall));
 
     let mut game = Game {
         board:     board,
