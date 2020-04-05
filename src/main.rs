@@ -7,6 +7,7 @@ use tcod::console::*;
 use tcod::input::*;
 use tcod::input::Key;
 use tcod::input::KeyCode::*;
+use tcod::pathfinding::AStar;
 use tcod::colors::*;
 
 
@@ -126,29 +127,60 @@ enum UnitKind {
     Engineer,
     Infantry,
     Missile,
-    Humvee
+    Humvee,
+    Flag,
+    Tank
 }
-
-// TODO:
-//   Refactor units to have:
-//     Health, Damage, Speed, Bonus table, and Missile flag.
 
 struct Bonus {
     against: UnitKind,
     damage:  u32
 }
 
+impl Bonus {
+    fn new(against: UnitKind, damage: u32) -> Self {
+        Bonus {
+            against: against,
+            damage:  damage
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+enum Space {
+    Ground,
+    Naval,
+    Air
+}
+
+impl Space {
+    fn can_traverse(&self, traverse: Traverse) -> bool {
+        match (self, traverse) {
+            (Space::Ground, Traverse::Ground) => true,
+            (Space::Ground, Traverse::Water)  => false,
+            (Space::Naval,  Traverse::Ground) => false,
+            (Space::Naval,  Traverse::Water)  => true,
+            (Space::Air,    Traverse::Ground) => true,
+            (Space::Air,    Traverse::Water)  => true,
+            (_, _)                            => false,
+        }
+    }
+}
+
 #[derive(Copy, Clone)]
 struct Unit {
     kind:  UnitKind,
+    space: Space,
     team:  Team,
     glyph: char,
 
-    health:     i32,
-    health_max: i32,
-    damage:     i32,
-    speed:      u32,
-    missile:    bool
+    health:      i32,
+    health_max:  i32,
+    damage:      i32,
+    speed:       i32,
+    actions:     i32, // TODO: Migrate 'speed' into action point system.
+    actions_max: i32,
+    missile:     bool
 }
 
 impl Unit {
@@ -157,70 +189,90 @@ impl Unit {
 
         match kind {
             Engineer => Unit {
-                kind:       Engineer,
-                team:       team,
-                glyph:      '\u{0080}',
-                health:     1,
-                health_max: 1,
-                damage:     1,
-                speed:      2,
-                missile:    false
+                kind:        Engineer,
+                space:       Space::Ground,
+                team:        team,
+                glyph:       '\u{0080}',
+                health:      1,
+                health_max:  1,
+                damage:      1,
+                speed:       2,
+                actions:     2,
+                actions_max: 2,
+                missile:     false
             },
 
             Infantry => Unit {
-                kind:       Infantry,
-                team:       team,
-                glyph:      '\u{0081}',
-                health:     2,
-                health_max: 2,
-                damage:     1,
-                speed:      2,
-                missile:    false
+                kind:        Infantry,
+                space:       Space::Ground,
+                team:        team,
+                glyph:       '\u{0081}',
+                health:      2,
+                health_max:  2,
+                damage:      1,
+                speed:       2,
+                actions:     2,
+                actions_max: 2,
+                missile:     false
             },
 
             Missile => Unit {
-                kind:       Missile,
-                team:       team,
-                glyph:      '\u{0082}',
-                health:     3,
-                health_max: 3,
-                damage:     5,
-                speed:      3,
-                missile:    true
+                kind:        Missile,
+                space:       Space::Air,
+                team:        team,
+                glyph:       '\u{0082}',
+                health:      3,
+                health_max:  3,
+                damage:      5,
+                speed:       3,
+                actions:     2,
+                actions_max: 2,
+                missile:     true
             },
 
             Humvee => Unit {
-                kind:       Humvee,
-                team:       team,
-                glyph:      '\u{0083}',
-                health:     3,
-                health_max: 3,
-                damage:     2,
-                speed:      3,
-                missile:    false
-            }
-        }
-    }
+                kind:        Humvee,
+                space:       Space::Ground,
+                team:        team,
+                glyph:       '\u{0083}',
+                health:      3,
+                health_max:  3,
+                damage:      1,
+                speed:       3,
+                actions:     2,
+                actions_max: 2,
+                missile:     false
+            },
 
-    /*
-    fn try_attack(&self, other: &Self) -> Attack {
-        use UnitKind::*;
-        
-        if self.rank < other.rank {
-            match (self.kind, other.kind) {
-                (Engineer, Missile) => Attack::Win,
-                _                   => Attack::Loss
+            Flag => Unit {
+                kind:        Flag,
+                space:       Space::Ground,
+                team:        team,
+                glyph:       '\u{0084}',
+                health:      1,
+                health_max:  1,
+                damage:      0,
+                speed:       0,
+                actions:     0,
+                actions_max: 0,
+                missile:     false
+            },
+
+            Tank => Unit {
+                kind:        Tank,
+                space:       Space::Ground,
+                team:        team,
+                glyph:       '\u{0085}',
+                health:      4,
+                health_max:  4,
+                damage:      2,
+                speed:       2,
+                actions:     2,
+                actions_max: 2,
+                missile:     false
             }
-        } else if self.rank > other.rank {
-            match (self.kind, other.kind) {
-                (Missile, Engineer) => Attack::Loss,
-                _                   => Attack::Win
-            }
-        } else {
-            Attack::Tie
         }
     }
-    */
 }
 
 #[derive(Copy, Clone)]
@@ -258,7 +310,8 @@ enum Traverse {
 
 enum TileKind {
     Floor,
-    Wall
+    Wall,
+    Ocean
 }
 
 #[derive(Copy, Clone)]
@@ -288,6 +341,14 @@ impl Tile {
                 fore_color: DARK_GREY,
                 back_color: DARK_GREY,
                 glyph:      ' ',
+                unit:       None
+            },
+
+            Ocean => Tile {
+                traverse:   Traverse::Water,
+                fore_color: DARKER_BLUE,
+                back_color: DARKEST_BLUE,
+                glyph:      '~',
                 unit:       None
             }
         }
@@ -408,6 +469,14 @@ impl Board {
         }
     }
 
+    fn get_unit_mut(&mut self, pos: Vec2) -> Option<&mut Unit> {
+        if let Some(tile) = self.get_tile_mut(pos) {
+            tile.unit_mut()
+        } else {
+            None
+        }
+    }
+
     fn spawn(&mut self, pos: Vec2, kind: UnitKind, team: Team) {
         if let Some(tile) = self.get_tile_mut(pos) {
             if tile.is_ground() {
@@ -416,14 +485,14 @@ impl Board {
         }
     }
 
-    fn navigation_map(&self) -> tcod::Map {
+    fn navigation_map(&self, space: Space) -> tcod::Map {
         let mut map = tcod::Map::new(self.width as i32, self.height as i32);
         for y in 0..self.height {
             for x in 0..self.width {
                 let tile = self.get_tile((x, y).into())
                     .unwrap();
 
-                map.set(x as i32, y as i32, true, tile.is_ground());
+                map.set(x as i32, y as i32, true, space.can_traverse(tile.traverse));
             }
         }
 
@@ -433,36 +502,63 @@ impl Board {
 
 struct Move {
     origin: Vec2,
-    dest:   Vec2
+    dest:   Vec2,
+    space:  Space
 }
 
 impl Move {
-    fn new(origin: Vec2, dest: Vec2) -> Self {
+    fn new(origin: Vec2, dest: Vec2, space: Space) -> Self {
         Move {
             origin,
-            dest
+            dest,
+            space
         }
     }
 }
 
-fn do_move(board: &mut Board, m: Move) {
+fn do_move(game: &mut Game, mut m: Move) {
+    let map       = game.board.navigation_map(m.space);
+    let mut astar = AStar::new_from_map(map, 0.0);
+
+    if !astar.find(m.origin.into(), m.dest.into()) {
+        println!("[Move] Target unreachable.");
+        return;
+    }
+
+    let mut pos_before_dest = m.origin;
+
+    // Procedurally walk towards the target until
+    // something happens to be in the way.
+    for pos in astar.walk() {
+        if let Some(target) = game.board.get_unit_mut(pos.into()) {
+            m.dest = pos.into();
+            break;
+        } else {
+            pos_before_dest = pos.into();
+        }
+    }
+
     // An essay can be written on the issues with this function.
-    let i = board.to_index(m.origin);
-    let j = board.to_index(m.dest);
+    let i = game.board.to_index(m.origin);
+    let j = game.board.to_index(m.dest);
+
+    let mut had_target    = false;
+    let mut target_killed = false;
     
-    if let Pair::Both(tile, other_tile) = index_twice(&mut board.tiles, i, j) {
+    if let Pair::Both(tile, other_tile) = index_twice(&mut game.board.tiles, i, j) {
         if other_tile.is_wall() {
-            println!("Movement blocked by wall.");
+            println!("[Move] Blocked by wall.");
             return;
         }
     
         if tile.team() == other_tile.team() {
-            println!("Movement blocked by friendly.");
+            println!("[Move] Blocked by friendly.");
             return;
         }
 
         match (tile.unit(), other_tile.unit_mut()) {
             (Some(unit), Some(other_unit)) => {
+                had_target = true;
                 (*other_unit).health -= unit.damage;
                 if other_unit.health <= 0 {
                     if unit.missile {
@@ -472,52 +568,28 @@ fn do_move(board: &mut Board, m: Move) {
                     }
 
                     tile.unit = None;
-                } else {
-                    
+                    target_killed = true;
                 }
-
-                /*
-                match unit.try_attack(&other_unit) {
-                    Attack::Loss => {
-                        *tile = Tile::None;
-    
-                        if other_unit.kind == UnitKind::Missile {
-                            *other_tile = Tile::None;    
-                        }
-                    },
-    
-                    Attack::Tie => {
-                        *tile       = Tile::None;
-                        *other_tile = Tile::None;
-                    },
-    
-                    Attack::Win => {
-                        println!("Win");
-                        
-                        if unit.kind == UnitKind::Missile {
-                            println!("Was missile");
-                            *other_tile = Tile::None;
-                        } else {
-                            println!("Was not missile");
-                            *other_tile = *tile;
-                        }
-
-                        *tile = Tile::None;
-                    }
-                }
-                */
             },
             
             (Some(_), None) => {
-                println!("The target was a floor.");
+                println!("[Move] The target was a floor.");
                 other_tile.unit = tile.unit;
                 tile.unit       = None;
             },
     
             _ => {
-                println!("No tile selected.");
+                println!("[Move] No tile selected.");
             }
         }   
+    }
+
+    if had_target && !target_killed {
+        let j = game.board.to_index(pos_before_dest);
+        if let Pair::Both(tile, other_tile) = index_twice(&mut game.board.tiles, i, j) {
+            other_tile.unit = tile.unit;
+            tile.unit       = None;
+        }
     }
 }
 
@@ -525,16 +597,18 @@ struct Movement {
     abs_origin:    Vec2,
     rel_origin:    Vec2,
     range:         u32,
+    space:         Space,
     valid_tiles:   Vec<Vec2>,
     checked_tiles: Vec<Vec2>
 }
 
 impl Movement {
-    fn new(abs_origin: Vec2, range: u32) -> Self {
+    fn new(abs_origin: Vec2, range: u32, space: Space) -> Self {
         Movement {
             abs_origin:    abs_origin,
             rel_origin:    abs_origin,
             range:         range,
+            space:         space,
             valid_tiles:   vec![],
             checked_tiles: vec![abs_origin]
         }
@@ -552,7 +626,7 @@ fn movement_query(board: &Board, movement: &mut Movement) {
             movement.abs_origin.square_distance_to(&north) <= movement.range {
             
             movement.checked_tiles.push(north);
-            if north_tile.is_ground() {
+            if movement.space.can_traverse(north_tile.traverse) {
                 movement.valid_tiles.push(north);
                 
                 let rel_origin = movement.rel_origin;
@@ -568,7 +642,7 @@ fn movement_query(board: &Board, movement: &mut Movement) {
             movement.abs_origin.square_distance_to(&east) <= movement.range {
             
             movement.checked_tiles.push(east);
-            if east_tile.is_ground() {
+            if movement.space.can_traverse(east_tile.traverse) {
                 movement.valid_tiles.push(east);
                 
                 let rel_origin = movement.rel_origin;
@@ -584,7 +658,7 @@ fn movement_query(board: &Board, movement: &mut Movement) {
             movement.abs_origin.square_distance_to(&south) <= movement.range {
             
             movement.checked_tiles.push(south);
-            if south_tile.is_ground() {
+            if movement.space.can_traverse(south_tile.traverse) {
                 movement.valid_tiles.push(south);
                 
                 let rel_origin = movement.rel_origin;
@@ -600,7 +674,7 @@ fn movement_query(board: &Board, movement: &mut Movement) {
             movement.abs_origin.square_distance_to(&west) <= movement.range {
             
             movement.checked_tiles.push(west);
-            if west_tile.is_ground() {
+            if movement.space.can_traverse(west_tile.traverse) {
                 movement.valid_tiles.push(west);
                 
                 let rel_origin = movement.rel_origin;
@@ -612,9 +686,9 @@ fn movement_query(board: &Board, movement: &mut Movement) {
     }
 
     // Post-processing to ensure tiles are reachable within the specified range.
-    let mut map = board.navigation_map();
+    let map = board.navigation_map(movement.space);
 
-    let mut astar  = tcod::pathfinding::AStar::new_from_map(map, 0.0);
+    let mut astar  = AStar::new_from_map(map, 0.0);
     let abs_origin = movement.abs_origin.into();
     let range      = movement.range;
 
@@ -714,32 +788,33 @@ fn draw(graphics: &mut Graphics, game: &Game) {
                     pos.x,
                     pos.y,
                     color,
-                    BackgroundFlag::Set
+                    BackgroundFlag::Add
                 );
             }
 
-            /*
-            let map = game.board.navigation_map();
-            let mut astar = tcod::pathfinding::AStar::new_from_map(map, 0.0);
-            if astar.find(selection.into(), game.world_pos.into()) {
-                for pos in astar.walk() {
-                    graphics.board.set_char_background(
-                        pos.0,
-                        pos.1,
-                        DARKEST_MAGENTA,
-                        BackgroundFlag::Set
-                    );
-                }
-            }
-            */
-
-            if !mouse_in_valid_region && game.world_pos != selection {
+            if !mouse_in_valid_region && 
+                game.world_pos != selection &&
+               !game.board.get_tile(game.world_pos).unwrap().is_wall() {
+                
                 graphics.board.set_char_background(
                     game.world_pos.x,
                     game.world_pos.y,
                     DARKEST_RED,
                     BackgroundFlag::Set
                 );
+            } else {
+                let map = game.board.navigation_map(unit.unwrap().space);
+                let mut astar = tcod::pathfinding::AStar::new_from_map(map, 0.0);
+                if astar.find(selection.into(), game.world_pos.into()) {
+                    for pos in astar.walk() {
+                        graphics.board.set_char_background(
+                            pos.0,
+                            pos.1,
+                            DARKEST_MAGENTA,
+                            BackgroundFlag::Set
+                        );
+                    }
+                }
             }
         }
     }
@@ -747,33 +822,80 @@ fn draw(graphics: &mut Graphics, game: &Game) {
     blit(&graphics.board, (0, 0), (0, 0), &mut graphics.root, graphics.board_offset, 1.0, 1.0);
 }
 
+fn spawn_menu(game: &mut Game, graphics: &mut Graphics) {
+    graphics.root.clear();
+    graphics.root.print(1, 1, "Spawn Menu");
+    graphics.root.print(2, 3, "1 Engineer");
+    graphics.root.print(2, 4, "2 Infantry");
+    graphics.root.print(2, 5, "3 Humvee");
+    graphics.root.print(2, 6, "4 Missile");
+    graphics.root.print(2, 7, "5 Flag");
+    graphics.root.print(2, 8, "6 Tank");
+    graphics.root.flush();
+
+    let mut kind: UnitKind;
+    
+    let key = graphics.root.wait_for_keypress(true);
+    match key.code {
+        KeyCode::Number1 => kind = UnitKind::Engineer,
+        KeyCode::Number2 => kind = UnitKind::Infantry,
+        KeyCode::Number3 => kind = UnitKind::Humvee,
+        KeyCode::Number4 => kind = UnitKind::Missile,
+        KeyCode::Number5 => kind = UnitKind::Flag,
+        KeyCode::Number6 => kind = UnitKind::Tank,
+        _ => { return; }
+    }
+    
+    graphics.root.clear();
+    graphics.root.print(1, 1, "Team");
+    graphics.root.print(2, 3, "1 Red");
+    graphics.root.print(2, 4, "2 Blue");
+    graphics.root.print(2, 5, "3 Green");
+    graphics.root.print(2, 6, "4 Yellow");
+    graphics.root.flush();
+
+    let mut team: Team;
+
+    let key = graphics.root.wait_for_keypress(true);
+    match key.code {
+        KeyCode::Number1 => team = Team::Red,
+        KeyCode::Number2 => team = Team::Blue,
+        KeyCode::Number3 => team = Team::Green,
+        KeyCode::Number4 => team = Team::Yellow,
+        _ => { return; }
+    }
+
+    game.board.spawn(game.world_pos, kind, team);
+}
+
 fn main() {
-    let mut root = Root::initializer()
-        .size(27, 27)
+    let root = Root::initializer()
+        .size(27, 21)
         .title("A Starless Void")
-        .font("res/Font 16x16 Extended.png", FontLayout::AsciiInRow)
+        .font("res/Font 32x32 Extended.png", FontLayout::AsciiInRow)
         .init();
 
     let mut board = Board::new(10, 10);
 
-    board.spawn((1, 1).into(), UnitKind::Engineer, Team::Red);
-    board.spawn((2, 1).into(), UnitKind::Infantry, Team::Red);
-    board.spawn((3, 1).into(), UnitKind::Infantry, Team::Red);
-    board.spawn((4, 1).into(), UnitKind::Infantry, Team::Red);
-    board.spawn((5, 1).into(), UnitKind::Missile,  Team::Red);
-    board.spawn((8, 8).into(), UnitKind::Engineer, Team::Blue);
-    board.spawn((7, 8).into(), UnitKind::Infantry, Team::Blue);
-    board.spawn((6, 8).into(), UnitKind::Infantry, Team::Blue);
-    board.spawn((5, 8).into(), UnitKind::Infantry, Team::Blue);
-    board.spawn((4, 8).into(), UnitKind::Missile,  Team::Blue);
+    // board.spawn((1, 1).into(), UnitKind::Engineer, Team::Red);
+    // board.spawn((2, 1).into(), UnitKind::Infantry, Team::Red);
+    // board.spawn((3, 1).into(), UnitKind::Infantry, Team::Red);
+    // board.spawn((4, 1).into(), UnitKind::Infantry, Team::Red);
+    // board.spawn((5, 1).into(), UnitKind::Missile,  Team::Red);
+    // board.spawn((8, 8).into(), UnitKind::Engineer, Team::Blue);
+    // board.spawn((7, 8).into(), UnitKind::Infantry, Team::Blue);
+    // board.spawn((6, 8).into(), UnitKind::Infantry, Team::Blue);
+    // board.spawn((5, 8).into(), UnitKind::Infantry, Team::Blue);
+    // board.spawn((4, 8).into(), UnitKind::Missile,  Team::Blue);
+
 
     board.spawn(Vec2::new(4, 4), UnitKind::Humvee,  Team::Green);
     
     // Idea: Units that can demolish walls. Maybe Engineers?
-    board.set_tile((3, 4).into(), Tile::new(TileKind::Wall));
-    board.set_tile((3, 5).into(), Tile::new(TileKind::Wall));
-    board.set_tile((6, 4).into(), Tile::new(TileKind::Wall));
-    board.set_tile((6, 5).into(), Tile::new(TileKind::Wall));
+    board.set_tile((3, 4).into(), Tile::new(TileKind::Ocean));
+    board.set_tile((3, 5).into(), Tile::new(TileKind::Ocean));
+    board.set_tile((6, 4).into(), Tile::new(TileKind::Ocean));
+    board.set_tile((6, 5).into(), Tile::new(TileKind::Ocean));
 
     let mut game = Game {
         board:     board,
@@ -798,7 +920,7 @@ fn main() {
         match game.state {
             PlayerState::Selecting => {
                 graphics.root.set_alignment(TextAlignment::Center);
-                graphics.root.print(12, 23, "=== Select ===");
+                graphics.root.print(12, 19, "=== Select ===");
                 graphics.root.set_alignment(TextAlignment::Left);
             
                 if let Some(unit) = game.board.get_unit(game.world_pos) {
@@ -808,8 +930,8 @@ fn main() {
 
             PlayerState::Moving => {
                 graphics.root.set_alignment(TextAlignment::Center);
-                graphics.root.print(12, 23, "=== Move ===");
-                graphics.root.print(12, 22, "Cancel (Esc)");
+                graphics.root.print(12, 19, "=== Move ===");
+                graphics.root.print(12, 18, "Cancel (Esc)");
                 graphics.root.set_alignment(TextAlignment::Left);
             
                 if let Some(unit) = game.board.get_unit(game.selection.unwrap()) {
@@ -852,6 +974,15 @@ fn main() {
                 game.state     = PlayerState::Selecting;
             },
 
+            Key {
+                code: Delete,
+                ..
+            } => {
+                if let Some(tile) = game.board.get_tile_mut(game.world_pos) {
+                    tile.unit = None;
+                }
+            }
+
             _ => {  }
         }
 
@@ -867,7 +998,7 @@ fn main() {
                         println!("Selected unit.");
                         game.selection = Some(world_pos);
 
-                        let mut movement = Movement::new(world_pos, unit.speed);
+                        let mut movement = Movement::new(world_pos, unit.speed as u32, unit.space);
                         movement_query(&game.board, &mut movement);
 
                         game.movement  = Some(movement);
@@ -876,13 +1007,14 @@ fn main() {
                 },
 
                 PlayerState::Moving => {
-                    println!("Attemping to move.");
+                    println!("[Move] Attemping to move.");
 
                     let selection = game.selection.unwrap();
 
                     if let Some(movement) = &game.movement {
+                        let space = movement.space;
                         if movement.valid_tiles.contains(&world_pos) {
-                            do_move(&mut game.board, Move::new(selection, world_pos));
+                            do_move(&mut game, Move::new(selection, world_pos, space));
 
                             game.selection = None;
                             game.movement  = None;
@@ -899,6 +1031,10 @@ fn main() {
                     }
                 }
             }
+        }
+        
+        if mouse.rbutton_pressed {
+            spawn_menu(&mut game, &mut graphics);
         }
     }
 }
