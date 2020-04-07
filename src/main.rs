@@ -10,33 +10,6 @@ use tcod::input::KeyCode::*;
 use tcod::pathfinding::AStar;
 use tcod::colors::*;
 
-
-
-// Pair<T> and index_twice<T> taken from: 
-// https://stackoverflow.com/questions/30073684/how-to-get-mutable-references-to-two-array-elements-at-the-same-time
-enum Pair<T> {
-    Both(T, T),
-    One(T),
-    None,
-}
-
-fn index_twice<T>(slc: &mut Vec<T>, a: usize, b: usize) -> Pair<&mut T> {
-    if a == b {
-        slc.get_mut(a).map_or(Pair::None, Pair::One)
-    } else {
-        if a >= slc.len() || b >= slc.len() {
-            Pair::None
-        } else {
-            // Safe because a and b are in bounds and distinct.
-            unsafe {
-                let ar = &mut *(slc.get_unchecked_mut(a) as *mut _);
-                let br = &mut *(slc.get_unchecked_mut(b) as *mut _);
-                Pair::Both(ar, br)
-            }
-        }
-    }
-}
-
 #[derive(Copy, Clone, PartialEq, Eq)]
 struct Vec2 {
     x: i32,
@@ -46,8 +19,7 @@ struct Vec2 {
 impl Vec2 {
     fn new(x: i32, y: i32) -> Self {
         Vec2 {
-            x: x,
-            y: y
+            x, y
         }
     }
 
@@ -55,18 +27,11 @@ impl Vec2 {
         *self - graphics.board_offset.into()
     }
 
-    fn diagonal_distance_to(&self, other: &Self) -> u32 {
-        let x = (other.x - self.x);
-        let y = (other.y - self.y);
-
-        ((x * x + y * y) as f32).sqrt().round() as u32
-    }
-
-    fn square_distance_to(&self, other: &Self) -> u32 {
+    fn square_distance_to(&self, other: &Self) -> i32 {
         let x = (other.x - self.x).abs();
         let y = (other.y - self.y).abs();
 
-        (x + y) as u32
+        x + y
     }
 }
 
@@ -132,20 +97,6 @@ enum UnitKind {
     Tank
 }
 
-struct Bonus {
-    against: UnitKind,
-    damage:  u32
-}
-
-impl Bonus {
-    fn new(against: UnitKind, damage: u32) -> Self {
-        Bonus {
-            against: against,
-            damage:  damage
-        }
-    }
-}
-
 #[derive(Copy, Clone)]
 enum Space {
     Ground,
@@ -174,17 +125,18 @@ struct Unit {
     team:  Team,
     glyph: char,
 
+    id:       usize, // Is this sane?
+    position: Vec2,
+
     health:      i32,
     health_max:  i32,
     damage:      i32,
     speed:       i32,
-    actions:     i32, // TODO: Migrate 'speed' into action point system.
-    actions_max: i32,
     missile:     bool
 }
 
 impl Unit {
-    fn new(kind: UnitKind, team: Team) -> Self {
+    fn new(id: usize, position: Vec2, kind: UnitKind, team: Team) -> Self {
         use UnitKind::*;
 
         match kind {
@@ -193,12 +145,12 @@ impl Unit {
                 space:       Space::Ground,
                 team:        team,
                 glyph:       '\u{0080}',
+                id:          id,
+                position:    position,
                 health:      1,
                 health_max:  1,
                 damage:      1,
                 speed:       2,
-                actions:     2,
-                actions_max: 2,
                 missile:     false
             },
 
@@ -207,12 +159,12 @@ impl Unit {
                 space:       Space::Ground,
                 team:        team,
                 glyph:       '\u{0081}',
+                id:          id,
+                position:    position,
                 health:      2,
                 health_max:  2,
                 damage:      1,
                 speed:       2,
-                actions:     2,
-                actions_max: 2,
                 missile:     false
             },
 
@@ -221,12 +173,12 @@ impl Unit {
                 space:       Space::Air,
                 team:        team,
                 glyph:       '\u{0082}',
+                id:          id,
+                position:    position,
                 health:      3,
                 health_max:  3,
                 damage:      5,
                 speed:       3,
-                actions:     2,
-                actions_max: 2,
                 missile:     true
             },
 
@@ -235,12 +187,12 @@ impl Unit {
                 space:       Space::Ground,
                 team:        team,
                 glyph:       '\u{0083}',
+                id:          id,
+                position:    position,
                 health:      3,
                 health_max:  3,
                 damage:      1,
                 speed:       3,
-                actions:     2,
-                actions_max: 2,
                 missile:     false
             },
 
@@ -249,12 +201,12 @@ impl Unit {
                 space:       Space::Ground,
                 team:        team,
                 glyph:       '\u{0084}',
+                id:          id,
+                position:    position,
                 health:      1,
                 health_max:  1,
                 damage:      0,
                 speed:       0,
-                actions:     0,
-                actions_max: 0,
                 missile:     false
             },
 
@@ -263,23 +215,16 @@ impl Unit {
                 space:       Space::Ground,
                 team:        team,
                 glyph:       '\u{0085}',
+                id:          id,
+                position:    position,
                 health:      4,
                 health_max:  4,
                 damage:      2,
                 speed:       2,
-                actions:     2,
-                actions_max: 2,
                 missile:     false
             }
         }
     }
-}
-
-#[derive(Copy, Clone)]
-enum Attack {
-    Loss,
-    Tie,
-    Win
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -319,8 +264,7 @@ struct Tile {
     traverse:   Traverse,
     fore_color: Color,
     back_color: Color,
-    glyph:      char,
-    unit:       Option<Unit>
+    glyph:      char
 }
 
 impl Tile {
@@ -332,33 +276,27 @@ impl Tile {
                 traverse:   Traverse::Ground,
                 fore_color: DARK_GREY,
                 back_color: BLACK,
-                glyph:      '.',
-                unit:       None
+                glyph:      '.'
             },
 
             Wall => Tile {
                 traverse:   Traverse::Wall,
                 fore_color: DARK_GREY,
                 back_color: DARK_GREY,
-                glyph:      ' ',
-                unit:       None
+                glyph:      ' '
             },
 
             Ocean => Tile {
                 traverse:   Traverse::Water,
                 fore_color: DARKER_BLUE,
                 back_color: DARKEST_BLUE,
-                glyph:      '~',
-                unit:       None
+                glyph:      '~'
             }
         }
     }
 
     fn fore_color(&self) -> Color {
-        match self.unit {
-            Some(unit) => unit.team.color(),
-            None       => self.fore_color
-        }
+        self.fore_color
     }
 
     fn back_color(&self) -> Color {
@@ -366,25 +304,7 @@ impl Tile {
     }
 
     fn glyph(&self) -> char {
-        match self.unit {
-            Some(unit) => unit.glyph,
-            None       => self.glyph
-        }
-    }
-
-    fn unit(&self) -> Option<&Unit> {
-        self.unit.as_ref()
-    }
-
-    fn unit_mut(&mut self) -> Option<&mut Unit> {
-        self.unit.as_mut()
-    }
-
-    fn team(&self) -> Option<Team> {
-        match self.unit {
-            Some(unit) => Some(unit.team),
-            None       => None
-        }
+        self.glyph
     }
 
     fn is_ground(&self) -> bool {
@@ -402,10 +322,19 @@ impl Tile {
     }
 }
 
+#[derive(Debug)]
+enum SpawnError {
+    InvalidPosition,
+    IncompatibleTerrain,
+    SpaceOccupied
+}
+
 struct Board {
-    width:  u32,
-    height: u32,
-    tiles:  Vec<Tile>
+    width:   u32,
+    height:  u32,
+    tiles:   Vec<Tile>,
+    spaces:  Vec<Option<usize>>,
+    units:   Vec<Unit>,
 }
 
 impl Board {
@@ -421,10 +350,14 @@ impl Board {
             tiles[(width - 1 + width * y) as usize] = Tile::new(TileKind::Wall);
         }
 
+        let spaces = vec![None; (width * height) as usize];
+
         Board {
             width:  width,
             height: height,
-            tiles:  tiles
+            tiles:  tiles,
+            spaces: spaces,
+            units:  Vec::new()
         }
     }
 
@@ -445,44 +378,47 @@ impl Board {
         }
     }
 
-    fn get_tile_mut(&mut self, pos: Vec2) -> Option<&mut Tile> {
-        if self.in_bounds(pos) {
-            let index = self.to_index(pos); // Compiler complains if this is inline with get_mut
-            self.tiles.get_mut(index)
+    fn unit_at(&self, position: Vec2) -> Option<&Unit> {
+        let index = self.to_index(position);
+        
+        if let Some(id) = self.spaces.get(index).unwrap() {
+            self.units.get(*id)
         } else {
             None
         }
     }
 
-    fn set_tile(&mut self, pos: Vec2, tile: Tile) {
-        if self.in_bounds(pos) {
-            let index = self.to_index(pos);
-            self.tiles[index] = tile;
-        }
-    }
-
-    fn get_unit(&self, pos: Vec2) -> Option<&Unit> {
-        if let Some(tile) = self.get_tile(pos) {
-            tile.unit()
+    fn unit_at_mut(&mut self, position: Vec2) -> Option<&mut Unit> {
+        let index = self.to_index(position);
+        
+        if let Some(id) = self.spaces.get(index).unwrap() {
+            self.units.get_mut(*id)
         } else {
             None
         }
     }
 
-    fn get_unit_mut(&mut self, pos: Vec2) -> Option<&mut Unit> {
-        if let Some(tile) = self.get_tile_mut(pos) {
-            tile.unit_mut()
-        } else {
-            None
-        }
-    }
+    fn spawn(&mut self, position: Vec2, kind: UnitKind, team: Team) -> Result<usize, SpawnError> {
+        let id    = self.units.len();
+        let index = self.to_index(position);
+        let unit  = Unit::new(id, position, kind, team);
 
-    fn spawn(&mut self, pos: Vec2, kind: UnitKind, team: Team) {
-        if let Some(tile) = self.get_tile_mut(pos) {
-            if tile.is_ground() {
-                tile.unit = Some(Unit::new(kind, team));
+        if let Some(tile) = self.get_tile(position) {
+            if !unit.space.can_traverse(tile.traverse) {
+                return Err(SpawnError::IncompatibleTerrain);
             }
+        } else {
+            return Err(SpawnError::InvalidPosition);
         }
+
+        if self.spaces[index].is_some() {
+            return Err(SpawnError::SpaceOccupied);
+        }
+
+        self.units.push(unit);
+        self.spaces[index] = Some(id);
+
+        Ok(id)
     }
 
     fn navigation_map(&self, space: Space) -> tcod::Map {
@@ -500,25 +436,160 @@ impl Board {
     }
 }
 
-struct Move {
-    origin: Vec2,
-    dest:   Vec2,
-    space:  Space
+#[derive(Debug)]
+enum DamageError {
+    InvalidPosition
 }
 
-impl Move {
-    fn new(origin: Vec2, dest: Vec2, space: Space) -> Self {
-        Move {
-            origin,
-            dest,
-            space
+fn do_damage(board: &mut Board, damage: Damage) -> Result<bool, DamageError> {
+    if !board.in_bounds(damage.at) {
+        return Err(DamageError::InvalidPosition);
+    }
+    
+    let target_killed = {
+        if let Some(unit) = board.unit_at_mut(damage.at) {
+            if unit.team != damage.team {
+                unit.health -= damage.amount;
+                unit.health  = unit.health.max(0);
+
+                if unit.health == 0 {
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
         }
+    };
+
+    if target_killed {
+        let index = board.to_index(damage.at);
+        board.spaces[index] = None;
+    }
+
+    Ok(target_killed)
+}
+
+#[derive(Debug)]
+enum WarpError {
+    InvalidSelection,
+    InvalidPosition,
+    IncompatibleTerrain,
+    SpaceOccupied
+}
+
+fn do_warp(board: &mut Board, warp: Warp) -> Result<(), WarpError> {
+    let (space, position) = {
+        if let Some(unit) = board.units.get(warp.unit) {
+            (unit.space, unit.position)
+        } else {
+            return Err(WarpError::InvalidSelection);
+        }
+    };
+
+    if let Some(tile) = board.get_tile(warp.to) {
+        if !space.can_traverse(tile.traverse) {
+            return Err(WarpError::IncompatibleTerrain);
+        }
+    } else {
+        return Err(WarpError::InvalidPosition);
+    }
+
+    if let Some(_) = board.unit_at(warp.to) {
+        return Err(WarpError::SpaceOccupied);
+    }
+
+    let i = board.to_index(position);
+    let j = board.to_index(warp.to);
+
+    board.spaces[i] = None;
+    board.spaces[j] = Some(warp.unit);
+    board.units[warp.unit].position = warp.to;
+
+    Ok(())
+}
+
+#[derive(Debug)]
+enum MoveError {
+    InvalidSelection,
+    InvalidPosition,
+    IncompatibleTerrain,
+    DestinationNotReachable,
+    SpaceOccupied
+}
+
+fn do_move(board: &mut Board, m: Move) -> Result<(), MoveError> {
+    let (space, damage, position, team) = {
+        if let Some(unit) = board.units.get(m.unit) {
+            (unit.space, unit.damage, unit.position, unit.team)
+        } else {
+            return Err(MoveError::InvalidSelection);
+        }
+    };
+
+    let mut astar = {
+        let map = board.navigation_map(space);
+        AStar::new_from_map(map, 0.0)
+    };
+
+    if !astar.find(position.into(), m.to.into()) {
+        return Err(MoveError::DestinationNotReachable);
+    }
+
+    let mut destination        = m.to;
+    let mut before_destination = position;
+
+    // Procedurally walk towards the target until
+    // something happens to be in the way.
+    for pos in astar.walk() {
+        if let Some(_) = board.unit_at(pos.into()) {
+            destination = pos.into();
+            break;
+        } else {
+            before_destination = pos.into();
+        }
+    }
+    
+    let (had_target, target_killed) = {
+        match do_damage(board, Damage { team: team, amount: damage, at: destination }) {
+            Ok(killed) => (true, killed),
+            Err(_)     => (false, false)
+        }
+    };
+
+    // println!("[Move] Had Target ({}), Killed ({})", had_target, target_killed);
+
+    let warp_result = {
+        if !had_target || target_killed {
+            do_warp(board, Warp { unit: m.unit, to: destination })
+        } else {
+            do_warp(board, Warp { unit: m.unit, to: before_destination })
+        }
+    };
+
+    match warp_result {
+        Err(error) => {
+            match error {
+                WarpError::InvalidSelection    => Err(MoveError::InvalidSelection),
+                WarpError::InvalidPosition     => Err(MoveError::InvalidPosition),
+                WarpError::IncompatibleTerrain => Err(MoveError::IncompatibleTerrain),
+                WarpError::SpaceOccupied       => Err(MoveError::SpaceOccupied)
+            }
+        },
+
+        Ok(_) => Ok(())
     }
 }
 
+/*
 fn do_move(game: &mut Game, mut m: Move) {
-    let map       = game.board.navigation_map(m.space);
-    let mut astar = AStar::new_from_map(map, 0.0);
+    let mut astar = {
+        let map = game.board.navigation_map(m.space);
+        AStar::new_from_map(map, 0.0)
+    };
 
     if !astar.find(m.origin.into(), m.dest.into()) {
         println!("[Move] Target unreachable.");
@@ -592,18 +663,35 @@ fn do_move(game: &mut Game, mut m: Move) {
         }
     }
 }
+*/
+
+struct Warp {
+    unit: usize,
+    to:   Vec2
+}
+
+struct Damage {
+    team:   Team,
+    amount: i32,
+    at:     Vec2
+}
+
+struct Move {
+    unit: usize,
+    to:   Vec2
+}
 
 struct Movement {
     abs_origin:    Vec2,
     rel_origin:    Vec2,
-    range:         u32,
+    range:         i32,
     space:         Space,
     valid_tiles:   Vec<Vec2>,
     checked_tiles: Vec<Vec2>
 }
 
 impl Movement {
-    fn new(abs_origin: Vec2, range: u32, space: Space) -> Self {
+    fn new(abs_origin: Vec2, range: i32, space: Space) -> Self {
         Movement {
             abs_origin:    abs_origin,
             rel_origin:    abs_origin,
@@ -694,7 +782,7 @@ fn movement_query(board: &Board, movement: &mut Movement) {
 
     movement.valid_tiles.retain(|&pos| {
         if astar.find(abs_origin, (pos.x, pos.y)) {
-            astar.walk().count() as u32 <= range
+            astar.walk().count() as i32 <= range
         } else {
             false
         }
@@ -704,7 +792,7 @@ fn movement_query(board: &Board, movement: &mut Movement) {
 #[derive(PartialEq, Eq)]
 enum PlayerState {
     Selecting,
-    Moving
+    Moving(usize)
 }
 
 struct Game {
@@ -726,21 +814,37 @@ fn draw(graphics: &mut Graphics, game: &Game) {
     graphics.root.clear();
     
     let unit: Option<&Unit> = {
-        if let Some(selection) = game.selection {
-            game.board.get_unit(selection)
-        } else {
-            None
+        match game.state {
+            PlayerState::Moving(id) => {
+                game.board.units.get(id)
+            },
+
+            _ => None
         }
     };
 
     for y in 0..game.board.height {
         for x in 0..game.board.width {
-            let tile = game.board.get_tile(Vec2::new(x as i32, y as i32))
+            let position = Vec2::new(x as i32, y as i32);
+            let tile = game.board.get_tile(position)
                 .unwrap();
 
-            let fore_color = tile.fore_color();
+            let fore_color = {
+                if let Some(unit) = game.board.unit_at(position) {
+                    unit.team.color()
+                } else {
+                    tile.fore_color()
+                }
+            };
+
             let back_color = tile.back_color();
-            let glyph      = tile.glyph();
+            let glyph      = {
+                if let Some(unit) = game.board.unit_at(position) {
+                    unit.glyph
+                } else {
+                    tile.glyph()
+                }
+            };
 
             graphics.board.put_char_ex(
                 x as i32,
@@ -754,8 +858,8 @@ fn draw(graphics: &mut Graphics, game: &Game) {
 
     // If there is a unit, we want to
     // invert the colour at that tile.
-    if unit.is_some() {
-        let selection  = game.selection.unwrap();
+    if let Some(unit) = unit {
+        let selection  = unit.position;
         let back_color = graphics.board.get_char_background(selection.x, selection.y);
         let fore_color = graphics.board.get_char_foreground(selection.x, selection.y);
         
@@ -803,7 +907,7 @@ fn draw(graphics: &mut Graphics, game: &Game) {
                     BackgroundFlag::Set
                 );
             } else {
-                let map = game.board.navigation_map(unit.unwrap().space);
+                let map = game.board.navigation_map(unit.space);
                 let mut astar = tcod::pathfinding::AStar::new_from_map(map, 0.0);
                 if astar.find(selection.into(), game.world_pos.into()) {
                     for pos in astar.walk() {
@@ -822,50 +926,91 @@ fn draw(graphics: &mut Graphics, game: &Game) {
     blit(&graphics.board, (0, 0), (0, 0), &mut graphics.root, graphics.board_offset, 1.0, 1.0);
 }
 
+fn menu_with_options(graphics: &mut Graphics, prompt: String, options: Vec<String>) -> Option<usize> {
+    graphics.root.clear();
+    graphics.root.print(0, 0, prompt);
+
+    for (i, option) in options.iter().enumerate() {
+        graphics.root.print(1, 1 + i as i32, format!("{} {}", i + 1, option));
+    }
+
+    graphics.root.flush();
+
+    let key = graphics.root.wait_for_keypress(true);
+    let selection = match key.code {
+        KeyCode::Number1 => 0,
+        KeyCode::Number2 => 1,
+        KeyCode::Number3 => 2,
+        KeyCode::Number4 => 3,
+        KeyCode::Number5 => 4,
+        KeyCode::Number6 => 5,
+        KeyCode::Number7 => 6,
+        KeyCode::Number8 => 7,
+        KeyCode::Number9 => 8,
+        KeyCode::Number0 => 9,
+        _                => return None
+    };
+
+    if selection < options.len() {
+        Some(selection)
+    } else {
+        None
+    }
+}
+
 fn spawn_menu(game: &mut Game, graphics: &mut Graphics) {
-    graphics.root.clear();
-    graphics.root.print(1, 1, "Spawn Menu");
-    graphics.root.print(2, 3, "1 Engineer");
-    graphics.root.print(2, 4, "2 Infantry");
-    graphics.root.print(2, 5, "3 Humvee");
-    graphics.root.print(2, 6, "4 Missile");
-    graphics.root.print(2, 7, "5 Flag");
-    graphics.root.print(2, 8, "6 Tank");
-    graphics.root.flush();
+    let selection = menu_with_options(graphics, String::from("Spawn/Unit"), vec![
+        String::from("Engineer"),
+        String::from("Infantry"),
+        String::from("Humvee"),
+        String::from("Missile"),
+        String::from("Flag"),
+        String::from("Tank")
+    ]);
 
-    let mut kind: UnitKind;
-    
-    let key = graphics.root.wait_for_keypress(true);
-    match key.code {
-        KeyCode::Number1 => kind = UnitKind::Engineer,
-        KeyCode::Number2 => kind = UnitKind::Infantry,
-        KeyCode::Number3 => kind = UnitKind::Humvee,
-        KeyCode::Number4 => kind = UnitKind::Missile,
-        KeyCode::Number5 => kind = UnitKind::Flag,
-        KeyCode::Number6 => kind = UnitKind::Tank,
-        _ => { return; }
+    let kind = match selection {
+        Some(index) => {
+            match index {
+                0 => UnitKind::Engineer,
+                1 => UnitKind::Infantry,
+                2 => UnitKind::Humvee,
+                3 => UnitKind::Missile,
+                4 => UnitKind::Flag,
+                5 => UnitKind::Tank,
+
+                _ => return
+            }
+        },
+
+        None => return
+    };
+
+    let selection = menu_with_options(graphics, String::from("Spawn/Unit/Team"), vec![
+        String::from("Red"),
+        String::from("Blue"),
+        String::from("Green"),
+        String::from("Yellow")
+    ]);
+
+    let team = match selection {
+        Some(index) => {
+            match index {
+                0 => Team::Red,
+                1 => Team::Blue,
+                2 => Team::Green,
+                3 => Team::Yellow,
+             
+                _ => return
+            }
+        },
+
+        None => return
+    };
+
+    match game.board.spawn(game.world_pos, kind, team) {
+        Ok(id)     => println!("[Spawn] Success (ID {}).", id),
+        Err(error) => println!("[Spawn] Failure ({:?})", error)
     }
-    
-    graphics.root.clear();
-    graphics.root.print(1, 1, "Team");
-    graphics.root.print(2, 3, "1 Red");
-    graphics.root.print(2, 4, "2 Blue");
-    graphics.root.print(2, 5, "3 Green");
-    graphics.root.print(2, 6, "4 Yellow");
-    graphics.root.flush();
-
-    let mut team: Team;
-
-    let key = graphics.root.wait_for_keypress(true);
-    match key.code {
-        KeyCode::Number1 => team = Team::Red,
-        KeyCode::Number2 => team = Team::Blue,
-        KeyCode::Number3 => team = Team::Green,
-        KeyCode::Number4 => team = Team::Yellow,
-        _ => { return; }
-    }
-
-    game.board.spawn(game.world_pos, kind, team);
 }
 
 fn main() {
@@ -875,30 +1020,8 @@ fn main() {
         .font("res/Font 32x32 Extended.png", FontLayout::AsciiInRow)
         .init();
 
-    let mut board = Board::new(10, 10);
-
-    // board.spawn((1, 1).into(), UnitKind::Engineer, Team::Red);
-    // board.spawn((2, 1).into(), UnitKind::Infantry, Team::Red);
-    // board.spawn((3, 1).into(), UnitKind::Infantry, Team::Red);
-    // board.spawn((4, 1).into(), UnitKind::Infantry, Team::Red);
-    // board.spawn((5, 1).into(), UnitKind::Missile,  Team::Red);
-    // board.spawn((8, 8).into(), UnitKind::Engineer, Team::Blue);
-    // board.spawn((7, 8).into(), UnitKind::Infantry, Team::Blue);
-    // board.spawn((6, 8).into(), UnitKind::Infantry, Team::Blue);
-    // board.spawn((5, 8).into(), UnitKind::Infantry, Team::Blue);
-    // board.spawn((4, 8).into(), UnitKind::Missile,  Team::Blue);
-
-
-    board.spawn(Vec2::new(4, 4), UnitKind::Humvee,  Team::Green);
-    
-    // Idea: Units that can demolish walls. Maybe Engineers?
-    board.set_tile((3, 4).into(), Tile::new(TileKind::Ocean));
-    board.set_tile((3, 5).into(), Tile::new(TileKind::Ocean));
-    board.set_tile((6, 4).into(), Tile::new(TileKind::Ocean));
-    board.set_tile((6, 5).into(), Tile::new(TileKind::Ocean));
-
     let mut game = Game {
-        board:     board,
+        board:     Board::new(10, 10),
         state:     PlayerState::Selecting,
         selection: None,
         movement:  None,
@@ -911,6 +1034,8 @@ fn main() {
         board_offset: (8, 6),
         board: Offscreen::new(game.board.width as i32, game.board.height as i32)
     };
+
+    game.board.spawn((4, 4).into(), UnitKind::Humvee, Team::Red).unwrap();
     
     while !graphics.root.window_closed() {
         graphics.root.set_default_background(BLACK);
@@ -923,22 +1048,22 @@ fn main() {
                 graphics.root.print(12, 19, "=== Select ===");
                 graphics.root.set_alignment(TextAlignment::Left);
             
-                if let Some(unit) = game.board.get_unit(game.world_pos) {
+                if let Some(unit) = game.board.unit_at(game.world_pos) {
                     graphics.root.print(1, 1, format!("HP {}/{}", unit.health, unit.health_max));
                 }
             },
 
-            PlayerState::Moving => {
+            PlayerState::Moving(id) => {
                 graphics.root.set_alignment(TextAlignment::Center);
                 graphics.root.print(12, 19, "=== Move ===");
                 graphics.root.print(12, 18, "Cancel (Esc)");
                 graphics.root.set_alignment(TextAlignment::Left);
             
-                if let Some(unit) = game.board.get_unit(game.selection.unwrap()) {
+                if let Some(unit) = game.board.units.get(id) {
                     graphics.root.print(1, 1, format!("HP {}/{}", unit.health, unit.health_max));
                 }
 
-                if let Some(target) = game.board.get_unit(game.world_pos) {
+                if let Some(target) = game.board.unit_at(game.world_pos) {
                     graphics.root.set_default_foreground(MAGENTA);
                     graphics.root.print(1, 2, format!("HP {}/{} (Target)", target.health, target.health_max));
                     graphics.root.set_default_foreground(WHITE);
@@ -978,9 +1103,11 @@ fn main() {
                 code: Delete,
                 ..
             } => {
+                /*
                 if let Some(tile) = game.board.get_tile_mut(game.world_pos) {
                     tile.unit = None;
                 }
+                */
             }
 
             _ => {  }
@@ -994,27 +1121,30 @@ fn main() {
             // This particular section seems messy/fragile.
             match game.state {
                 PlayerState::Selecting => {
-                    if let Some(unit) = game.board.get_unit(world_pos) {
-                        println!("Selected unit.");
-                        game.selection = Some(world_pos);
+                    if let Some(unit) = game.board.unit_at(world_pos) {
+                        println!("[Select] Selected unit.");
 
-                        let mut movement = Movement::new(world_pos, unit.speed as u32, unit.space);
+                        let mut movement = Movement::new(world_pos, unit.speed, unit.space);
                         movement_query(&game.board, &mut movement);
 
                         game.movement  = Some(movement);
-                        game.state     = PlayerState::Moving;
+                        game.state     = PlayerState::Moving(unit.id);
                     }
                 },
 
-                PlayerState::Moving => {
+                PlayerState::Moving(id) => {
                     println!("[Move] Attemping to move.");
-
-                    let selection = game.selection.unwrap();
 
                     if let Some(movement) = &game.movement {
                         let space = movement.space;
                         if movement.valid_tiles.contains(&world_pos) {
-                            do_move(&mut game, Move::new(selection, world_pos, space));
+                            match do_move(&mut game.board, Move {
+                                unit: id,
+                                to:   world_pos
+                            }) {
+                                Err(error) => println!("[Move] Failure ({:?})", error),
+                                Ok(_)      => println!("[Move] Success")
+                            }
 
                             game.selection = None;
                             game.movement  = None;
