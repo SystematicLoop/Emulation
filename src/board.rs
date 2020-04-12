@@ -105,9 +105,10 @@ impl Tile {
 
 #[derive(Debug)]
 pub struct Board {
-    size:         Dimension,
-    tiles:        Vec<Tile>,
-    pub entities: Vec<Option<EntityIndex>>
+    size:  Dimension,
+    tiles: Vec<Tile>,
+    
+    entities: Vec<Option<EntityIndex>>
 }
 
 impl Board {
@@ -129,7 +130,7 @@ impl Board {
                 tiles
             },
 
-            entities: vec![None; size.area() as usize]
+            entities:     vec![None; size.area() as usize]
         }
     }
 
@@ -168,6 +169,28 @@ impl Board {
             Some(&self.tiles[index])
         } else {
             None
+        }
+    }
+
+    pub fn swap_between(&mut self, from: Position, to: Position) {
+        if let (Some(i), Some(j)) = (self.to_index(from), self.to_index(to)) {
+            self.entities.swap(i, j);
+        }
+    }
+
+    pub fn insert_at(&mut self, position: Position, entity: EntityIndex) {
+        if self.entity_at(position).is_some() {
+            return;
+        }
+        
+        if let Some(index) = self.to_index(position) {
+            self.entities[index] = Some(entity);
+        }
+    }
+
+    pub fn remove_at(&mut self, position: Position) {
+        if let Some(index) = self.to_index(position) {
+            self.entities[index] = None;
         }
     }
 

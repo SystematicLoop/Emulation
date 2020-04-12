@@ -135,7 +135,7 @@ pub enum KeyCode {
     A, B, C, D, E, F, G, H, I, J, K, L, M,
     N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
 
-    Right, Up, Left, Down, Space, Escape,
+    Right, Up, Left, Down, Space, Escape, Delete,
 
     // Ensure this is the last item in the list.
     // It is used for determining the number of
@@ -181,6 +181,7 @@ impl From<TcodKey> for KeyCode {
 
                 TcodKeyCode::Spacebar => KeyCode::Space,
                 TcodKeyCode::Escape   => KeyCode::Escape,
+                TcodKeyCode::Delete   => KeyCode::Delete,
                 
                 _ => {
                     KeyCode::Unknown

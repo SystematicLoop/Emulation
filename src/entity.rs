@@ -8,17 +8,23 @@ pub enum Team {
     Blue,
     Green,
     Yellow,
+    Cyan,
+    Orange,
+    Magenta,
     White
 }
 
 impl Team {
     pub fn color(&self) -> Color {
         match self {
-            Team::Red    => RED,
-            Team::Blue   => BLUE,
-            Team::Green  => GREEN,
-            Team::Yellow => YELLOW,
-            Team::White  => WHITE
+            Team::Red     => RED,
+            Team::Blue    => BLUE,
+            Team::Green   => GREEN,
+            Team::Yellow  => YELLOW,
+            Team::Cyan    => CYAN,
+            Team::Orange  => ORANGE,
+            Team::Magenta => MAGENTA,
+            Team::White   => WHITE
         }
     }
 }
@@ -52,7 +58,10 @@ pub enum UnitKind {
     Humvee,
     Tank,
     Missile,
-    Flag
+    Flag,
+    Barracks,
+    Factory,
+    Airbase
 }
 
 struct UnitBuilder {
@@ -244,6 +253,19 @@ impl Unit {
                     .with_damage(0)
                     .with_range(0)
                     .with_actions(1)
+            },
+
+            UnitKind::Barracks => {
+                builder = builder
+                    .with_name(String::from("Barracks"))
+                    .with_glyph('\u{0091}')
+                    .with_space(Space::Ground)
+                    .with_health(3)
+                    .with_actions(2)
+            },
+
+            _ => {
+                unimplemented!();
             }
         }
 

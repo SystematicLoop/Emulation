@@ -7,8 +7,6 @@ use tcod::colors::*;
 use generational_arena::Arena;
 use generational_arena::Index as EntityIndex;
 
-use std::collections::VecDeque;
-
 mod entity;
 mod position;
 mod board;
@@ -29,6 +27,9 @@ use menu::*;
 enum PlayerState {
     Selecting,
     Controlling(EntityIndex),
+    Moving(EntityIndex),
+    Attacking(EntityIndex),
+    Building(EntityIndex),
     GameOver
 }
 
@@ -67,7 +68,7 @@ pub enum SpawnError {
 
 impl Game {
     fn spawn(&mut self, data: SpawnData) -> Result<EntityIndex, SpawnError> {
-        let index = self.board.to_index(data.position).ok_or(SpawnError::PositionOutOfBounds)?;
+        self.board.to_index(data.position).ok_or(SpawnError::PositionOutOfBounds)?;
         
         if self.board.entity_at(data.position).is_some() {
             return Err(SpawnError::PositionOccupied);
@@ -76,7 +77,7 @@ impl Game {
         let unit = Unit::new(data.kind, data.team, data.position);
         let entity = self.units.insert(unit);
 
-        self.board.entities[index] = Some(entity);
+        self.board.insert_at(data.position, entity);
 
         Ok(entity)
     }
@@ -162,16 +163,12 @@ fn move_unit(game: &mut Game, intent: IntentToMove) -> Result<(), MoveError> {
         return Err(MoveError::DestinationUnreachable);
     }
 
-    let index_from = game.board.to_index_unchecked(unit.position);
-    let index_to   = game.board.to_index_unchecked(intent.to);
-
     let tile = game.board.tile_at(intent.to).unwrap();
     if !unit.space.can_traverse(tile.traverse()) {
         return Err(MoveError::TerrainIncompatible);
     }
     
-    game.board.entities[index_to]   = game.board.entities[index_from];
-    game.board.entities[index_from] = None;
+    game.board.swap_between(unit.position, intent.to);
 
     unit.position = intent.to;
 
@@ -303,33 +300,62 @@ fn draw(game: &Game, graphics: &mut Graphics, input: &Input) {
     // Highlight the selected entity
     if let PlayerState::Controlling(entity) = game.player_state {
         let unit = game.units.get(entity).unwrap();
+    
+        invert_cell(&mut graphics.board, unit.position);
+    }
 
-        let fore_color = graphics.board.get_char_foreground(unit.position.x, unit.position.y);
-        let back_color = graphics.board.get_char_background(unit.position.x, unit.position.y);
+    match game.player_state {
+        PlayerState::Moving(entity) => {
+            let unit = game.units.get(entity).unwrap();
+            invert_cell(&mut graphics.board, unit.position);
 
-        graphics.board.set_char_foreground(unit.position.x, unit.position.y, back_color);
-        graphics.board.set_char_background(unit.position.x, unit.position.y, fore_color, BackgroundFlag::Set);
-
-        if unit.actions != 0 {
-            let action_circle = ActionCircle::new(unit.position, unit.range, Some(unit.space), &game.board);
-            for (position, _) in action_circle {    
+            let action_circle = ActionCircle::new(unit.position, unit.actions, Some(unit.space), &game.board);
+            for (position, _) in action_circle {
                 graphics.board.set_char_background(
                     position.x,
                     position.y,
-                    DARKEST_RED,
-                    BackgroundFlag::Set
+                    DARKEST_GREY,
+                    BackgroundFlag::Add
                 );
             }
-        }
+        },
 
-        let action_circle = ActionCircle::new(unit.position, unit.actions, Some(unit.space), &game.board);
-        for (position, _) in action_circle {
-            graphics.board.set_char_background(
-                position.x,
-                position.y,
-                DARKEST_GREY,
-                BackgroundFlag::Add
-            );
+        PlayerState::Attacking(entity) => {
+            let unit = game.units.get(entity).unwrap();
+            invert_cell(&mut graphics.board, unit.position);
+
+            if unit.actions != 0 {
+                let action_circle = ActionCircle::new(unit.position, unit.range, Some(unit.space), &game.board);
+                for (position, _) in action_circle {    
+                    graphics.board.set_char_background(
+                        position.x,
+                        position.y,
+                        DARKEST_RED,
+                        BackgroundFlag::Set
+                    );
+                }
+            }
+        },
+
+        PlayerState::Building(entity) => {
+            let unit = game.units.get(entity).unwrap();
+            invert_cell(&mut graphics.board, unit.position);
+
+            if unit.actions != 0 {
+                let action_circle = ActionCircle::new(unit.position, 1, None, &game.board);
+                for (position, _) in action_circle {    
+                    graphics.board.set_char_background(
+                        position.x,
+                        position.y,
+                        DARKEST_GREEN,
+                        BackgroundFlag::Set
+                    );
+                }
+            }
+        },
+
+        _ => {
+
         }
     }
 
@@ -394,7 +420,31 @@ fn draw(game: &Game, graphics: &mut Graphics, input: &Input) {
             graphics.root.print(
                 2,
                 graphics.root.height() - 2,
+                "Awaiting Orders"
+            );
+        },
+
+        PlayerState::Moving(_) => {
+            graphics.root.print(
+                2,
+                graphics.root.height() - 2,
                 "Moving"
+            );
+        },
+
+        PlayerState::Attacking(_) => {
+            graphics.root.print(
+                2,
+                graphics.root.height() - 2,
+                "Attacking"
+            );
+        },
+
+        PlayerState::Building(_) => {
+            graphics.root.print(
+                2,
+                graphics.root.height() - 2,
+                "Building"
             );
         },
 
@@ -417,7 +467,7 @@ fn draw(game: &Game, graphics: &mut Graphics, input: &Input) {
             graphics.root.print(
                 1,
                 2,
-                format!("HP {}/{} | AP {}/{}", unit.health, unit.health_max, unit.actions, unit.actions_max)
+                format!("HP {}/{}   AP {}/{}", unit.health, unit.health_max, unit.actions, unit.actions_max)
             )
         }
     }
@@ -434,6 +484,10 @@ fn read_input(game: &mut Game, graphics: &mut Graphics, input: &mut Input) {
         if !game.next_turn() {
             return;
         }
+    }
+
+    if input.key(KeyCode::Delete).down {
+        game.damage_queue.push(DamageAtPos::new(world_pos, 100));
     }
 
     if input.button(MouseButton::Right).down {
@@ -459,13 +513,94 @@ fn read_input(game: &mut Game, graphics: &mut Graphics, input: &mut Input) {
                 return;
             }
 
+            if input.key(KeyCode::M).down {
+                game.player_state = PlayerState::Moving(entity);
+                return;
+            }
+
+            if input.key(KeyCode::A).down {
+                game.player_state = PlayerState::Attacking(entity);
+                return;
+            }
+
+            if input.key(KeyCode::B).down {
+                game.player_state = PlayerState::Building(entity);
+                return;
+            }
+        },
+
+        PlayerState::Moving(entity) => {
+            if input.key(KeyCode::Escape).down {
+                game.player_state = PlayerState::Selecting;
+                return;
+            }
+
+            if input.key(KeyCode::A).down {
+                game.player_state = PlayerState::Attacking(entity);
+                return;
+            }
+
+            if input.key(KeyCode::B).down {
+                game.player_state = PlayerState::Building(entity);
+                return;
+            }
+
+            if input.button(MouseButton::Left).down {
+                let intent = IntentToMove {
+                    entity,
+                    to: world_pos
+                };
+
+                let result = move_unit(game, intent);
+                match result {
+                    Ok(()) => {
+                        println!("[Move] Success");
+                        let unit = game.units.get(entity).unwrap();
+                        if unit.actions == 0 {
+                            game.player_state = PlayerState::Selecting;
+                        }
+                    },
+
+                    Err(error) => {
+                        println!("[Move] Failure ({:?})", error);
+                        match error {
+                            MoveError::UnitInvalid |
+                            MoveError::UnitExhausted => {
+                                game.player_state = PlayerState::Selecting;
+                            }
+
+                            _ => {
+
+                            }
+                        }
+                    }
+                }
+            }
+        },
+
+        PlayerState::Attacking(entity) => {
+            if input.key(KeyCode::Escape).down {
+                game.player_state = PlayerState::Selecting;
+                return;
+            }
+
+            if input.key(KeyCode::M).down {
+                game.player_state = PlayerState::Moving(entity);
+                return;
+            }
+
+            if input.key(KeyCode::B).down {
+                game.player_state = PlayerState::Building(entity);
+                return;
+            }
+
             if input.button(MouseButton::Left).down {
                 if let Some(target_entity) = game.board.entity_at(world_pos) {
                     let intent = IntentToAttack {
                         entity,
                         target_entity
                     };
-
+    
                     let result = attack_with_unit(game, intent);
                     match result {
                         Ok(()) => {
@@ -475,7 +610,7 @@ fn read_input(game: &mut Game, graphics: &mut Graphics, input: &mut Input) {
                                 game.player_state = PlayerState::Selecting;
                             }
                         },
-
+    
                         Err(error) => {
                             println!("[Attack] Failure ({:?})", error);
                             match error {
@@ -483,39 +618,9 @@ fn read_input(game: &mut Game, graphics: &mut Graphics, input: &mut Input) {
                                 AttackError::UnitExhausted => {
                                     game.player_state = PlayerState::Selecting;
                                 },
-
-                                _ => {
-
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    let intent = IntentToMove {
-                        entity,
-                        to: world_pos
-                    };
     
-                    let result = move_unit(game, intent);
-                    match result {
-                        Ok(()) => {
-                            println!("[Move] Success");
-                            let unit = game.units.get(entity).unwrap();
-                            if unit.actions == 0 {
-                                game.player_state = PlayerState::Selecting;
-                            }
-                        },
-    
-                        Err(error) => {
-                            println!("[Move] Failure ({:?})", error);
-                            match error {
-                                MoveError::UnitInvalid |
-                                MoveError::UnitExhausted => {
-                                    game.player_state = PlayerState::Selecting;
-                                }
-
                                 _ => {
-
+    
                                 }
                             }
                         }
@@ -523,6 +628,28 @@ fn read_input(game: &mut Game, graphics: &mut Graphics, input: &mut Input) {
                 }
             }
         },
+
+        PlayerState::Building(entity) => {
+            if input.key(KeyCode::Escape).down {
+                game.player_state = PlayerState::Selecting;
+                return;
+            }
+
+            if input.key(KeyCode::M).down {
+                game.player_state = PlayerState::Moving(entity);
+                return;
+            }
+
+            if input.key(KeyCode::A).down {
+                game.player_state = PlayerState::Attacking(entity);
+                return;
+            }
+
+            if input.button(MouseButton::Left).down {
+                println!("Build!");
+                game.player_state = PlayerState::Selecting;
+            }
+        }
         
         _ => {
 
@@ -538,7 +665,8 @@ fn spawn_menu(game: &mut Game, graphics: &mut Graphics, input: &mut Input, at: P
         .with_option(String::from("Humvee"),   UnitKind::Humvee)
         .with_option(String::from("Tank"),     UnitKind::Tank)
         .with_option(String::from("Missile"),  UnitKind::Missile)
-        .with_option(String::from("Flag"),     UnitKind::Flag);
+        .with_option(String::from("Flag"),     UnitKind::Flag)
+        .with_option(String::from("Barracks"), UnitKind::Barracks);
 
     let menu = builder.build();
 
@@ -567,11 +695,14 @@ fn spawn_menu(game: &mut Game, graphics: &mut Graphics, input: &mut Input, at: P
 
     let builder = MenuBuilder::new()
         .with_prompt(String::from("Spawn/Unit/Team"))
-        .with_option(String::from("Red"),    Team::Red)
-        .with_option(String::from("Blue"),   Team::Blue)
-        .with_option(String::from("Green"),  Team::Green)
-        .with_option(String::from("Yellow"), Team::Yellow)
-        .with_option(String::from("White"),  Team::White);
+        .with_option(String::from("Red"),     Team::Red)
+        .with_option(String::from("Blue"),    Team::Blue)
+        .with_option(String::from("Green"),   Team::Green)
+        .with_option(String::from("Yellow"),  Team::Yellow)
+        .with_option(String::from("Cyan"),    Team::Cyan)
+        .with_option(String::from("Orange"),  Team::Orange)
+        .with_option(String::from("Magenta"), Team::Magenta)
+        .with_option(String::from("White"),   Team::White);
 
     let menu = builder.build();
 
@@ -604,29 +735,23 @@ fn spawn_menu(game: &mut Game, graphics: &mut Graphics, input: &mut Input, at: P
 }
 
 fn bring_out_your_dead(game: &mut Game) {
-    let mut killed: Vec<EntityIndex> = Vec::new();
     for damage in &game.damage_queue {
         if let Some(entity) = game.board.entity_at(damage.at) {
-            let unit = game.units.get_mut(entity).unwrap();
-            unit.health -= damage.amount.min(unit.health);
-            
-            if !killed.contains(&entity) && unit.health == 0 {
-                killed.push(entity);
+            if let Some(unit) = game.units.get_mut(entity) {
+                unit.health -= damage.amount.min(unit.health);
+
+                if unit.health == 0 {
+                    game.board.remove_at(unit.position);
+                }
             }
-        } 
+        }
     }
 
     game.damage_queue.clear();
 
-    for entity in killed {
-        for i in 0..game.board.entities.len() {
-            if game.board.entities[i] == Some(entity) {
-                game.board.entities[i] = None;
-            }
-        }
-
-        game.units.remove(entity);
-    }
+    game.units.retain(|_, unit| {
+        unit.health != 0
+    });
 }
 
 fn main() {
@@ -658,6 +783,8 @@ fn main() {
     game.spawn(SpawnData::new(UnitKind::Infantry, Team::Blue,   Position::new(5, 2))).unwrap();
     game.spawn(SpawnData::new(UnitKind::Humvee,   Team::Green,  Position::new(2, 7))).unwrap();
     game.spawn(SpawnData::new(UnitKind::Tank,     Team::Yellow, Position::new(4, 6))).unwrap();
+
+    game.spawn(SpawnData::new(UnitKind::Barracks, Team::Red,    Position::new(2, 1))).unwrap();
 
     if !game.next_turn() {
         println!("Could not start. No units on the battlefield.");
